@@ -8,6 +8,7 @@ setup() {
     export FAKE_LOCAL_REPOSITORY="${BATS_TEST_DIRNAME}/tests_local_repository"
     export FAKE_REMOTE="${BATS_TEST_DIRNAME}/tests_remote_repository"
     export FAKE_TEMP_LOCAL_REPOSITORY="${BATS_TEST_DIRNAME}/tests_clone_of_remote_repository"
+    export FAKE_FOLDER_WITHOUT_GIT_REPO="/tmp/tests_folder_without_git_repo"
 
     # While it is likely the GitHub hosted runners will use master as the default branch,
     # locally anyone may change that. So for tests lets grab whatever is currently set
@@ -20,6 +21,7 @@ setup() {
     export FAKE_DEFAULT_BRANCH=$(git config init.defaultBranch)
 
     # Set default INPUT variables used by the GitHub Action
+    export INPUT_CREATE_GIT_TAG_ONLY=false
     export INPUT_REPOSITORY="${FAKE_LOCAL_REPOSITORY}"
     export INPUT_COMMIT_MESSAGE="Commit Message"
     export INPUT_BRANCH="${FAKE_DEFAULT_BRANCH}"
@@ -30,13 +32,29 @@ setup() {
     export INPUT_COMMIT_USER_NAME="Test Suite"
     export INPUT_COMMIT_USER_EMAIL="test@github.com"
     export INPUT_COMMIT_AUTHOR="Test Suite <test@users.noreply.github.com>"
+    export INPUT_TAG_NAME=""
     export INPUT_TAGGING_MESSAGE=""
     export INPUT_PUSH_OPTIONS=""
     export INPUT_SKIP_DIRTY_CHECK=false
     export INPUT_SKIP_FETCH=false
     export INPUT_SKIP_CHECKOUT=false
+    export INPUT_SKIP_PUSH=false
     export INPUT_DISABLE_GLOBBING=false
     export INPUT_CREATE_BRANCH=false
+    export INPUT_DISABLE_PULL_REQUEST_TARGET_TRIGGER_WARNING=false
+    export INPUT_INTERNAL_GIT_BINARY=git
+    export INPUT_BEFORE_ADD_HOOK=""
+    export INPUT_AFTER_ADD_HOOK=""
+    export INPUT_BEFORE_COMMIT_HOOK=""
+    export INPUT_AFTER_COMMIT_HOOK=""
+    export INPUT_BEFORE_TAG_HOOK=""
+    export INPUT_AFTER_TAG_HOOK=""
+    export INPUT_BEFORE_PUSH_HOOK=""
+    export INPUT_AFTER_PUSH_HOOK=""
+
+    # Unset the GitHub event name by default so tests do not pick up
+    # pull_request_target from the environment of the shell running BATS.
+    unset GITHUB_EVENT_NAME
 
     # Set GitHub environment variables used by the GitHub Action
     temp_github_output_file=$(mktemp -t github_output_test.XXXXX)
@@ -57,7 +75,13 @@ teardown() {
     rm -rf "${FAKE_LOCAL_REPOSITORY}"
     rm -rf "${FAKE_REMOTE}"
     rm -rf "${FAKE_TEMP_LOCAL_REPOSITORY}"
-    rm "${GITHUB_OUTPUT}"
+    rm -rf "${INPUT_REPOSITORY}"
+
+    if [ -z ${GITHUB_OUTPUT+x} ]; then
+        echo "GITHUB_OUTPUT is not set"
+    else
+        rm "${GITHUB_OUTPUT}"
+    fi
 }
 
 # Create a fake remote repository which tests can push against
@@ -112,8 +136,9 @@ cat_github_output() {
     assert_line "INPUT_FILE_PATTERN: ."
     assert_line "INPUT_COMMIT_OPTIONS: "
     assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAG_NAME: "
     assert_line "INPUT_TAGGING_MESSAGE: "
-    assert_line "No tagging message supplied. No tag will be added."
+    assert_line "Neither tag nor tag message is set. No tag will be added."
     assert_line "INPUT_PUSH_OPTIONS: "
     assert_line "::debug::Apply push options "
     assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
@@ -135,8 +160,9 @@ cat_github_output() {
     assert_line "INPUT_FILE_PATTERN: ."
     assert_line "INPUT_COMMIT_OPTIONS: "
     assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAG_NAME: "
     assert_line "INPUT_TAGGING_MESSAGE: "
-    assert_line "No tagging message supplied. No tag will be added."
+    assert_line "Neither tag nor tag message is set. No tag will be added."
     assert_line "INPUT_PUSH_OPTIONS: "
     assert_line "::debug::Apply push options "
     assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
@@ -184,7 +210,6 @@ cat_github_output() {
     assert_failure
 
     assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
-    assert_line "INPUT_BRANCH value: ${FAKE_DEFAULT_BRANCH}"
     assert_line "INPUT_FILE_PATTERN: ."
     assert_line "INPUT_COMMIT_OPTIONS: "
     assert_line "::debug::Apply commit options "
@@ -253,7 +278,7 @@ cat_github_output() {
 }
 
 @test "It applies commit user and author settings" {
-    INPUT_COMMIT_USER_NAME="A Single Test"
+    INPUT_COMMIT_USER_NAME="Custom User Name"
     INPUT_COMMIT_USER_EMAIL="single-test@github.com"
     INPUT_COMMIT_AUTHOR="A Single Test <single@users.noreply.github.com>"
 
@@ -263,7 +288,7 @@ cat_github_output() {
 
     assert_success
 
-    assert_line "INPUT_COMMIT_USER_NAME: A Single Test"
+    assert_line "INPUT_COMMIT_USER_NAME: Custom User Name"
     assert_line "INPUT_COMMIT_USER_EMAIL: single-test@github.com"
     assert_line "INPUT_COMMIT_AUTHOR: A Single Test <single@users.noreply.github.com>"
     assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
@@ -276,14 +301,15 @@ cat_github_output() {
     assert_output --partial "A Single Test"
 
     run git log -1 --pretty=format:'%cn'
-    assert_output --partial "A Single Test"
+    assert_output --partial "Custom User Name"
 
     run git log -1 --pretty=format:'%ce'
     assert_output --partial "single-test@github.com"
 }
 
 @test "It creates a tag with the commit" {
-    INPUT_TAGGING_MESSAGE="v1.0.0"
+    INPUT_TAG_NAME="v1.0.0"
+    INPUT_TAGGING_MESSAGE="MyProduct v1.0.0"
 
     touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
 
@@ -291,13 +317,15 @@ cat_github_output() {
 
     assert_success
 
-    assert_line "INPUT_TAGGING_MESSAGE: v1.0.0"
-    assert_line "::debug::Create tag v1.0.0"
+    assert_line "INPUT_TAG_NAME: v1.0.0"
+    assert_line "INPUT_TAGGING_MESSAGE: MyProduct v1.0.0"
+
+    assert_line "::debug::Create tag v1.0.0: MyProduct v1.0.0"
     assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
 
     # Assert a tag v1.0.0 has been created
-    run git tag
-    assert_output v1.0.0
+    run git tag -n
+    assert_output 'v1.0.0          MyProduct v1.0.0'
 
     run git ls-remote --tags --refs
     assert_output --partial refs/tags/v1.0.0
@@ -336,6 +364,24 @@ cat_github_output() {
     remote_sha="$(git rev-parse --verify --short origin/${FAKE_DEFAULT_BRANCH})"
 
     assert_equal $current_sha $remote_sha
+}
+
+@test "If SKIP_PUSH is true git-push will not be called" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    INPUT_SKIP_PUSH=true
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "::debug::git-push will not be executed."
+
+    # Assert that the sha values are not equal on local and remote
+    current_sha="$(git rev-parse --verify --short ${FAKE_DEFAULT_BRANCH})"
+    remote_sha="$(git rev-parse --verify --short origin/${FAKE_DEFAULT_BRANCH})"
+
+    refute [assert_equal $current_sha $remote_sha]
 }
 
 @test "It can checkout a different branch" {
@@ -378,9 +424,11 @@ cat_github_output() {
     assert_equal $current_sha $remote_sha
 }
 
-@test "It uses existing branch when INPUT_BRANCH is empty and INPUT_TAGGING_MESSAGE is set" {
+@test "It uses existing branch when INPUT_BRANCH is empty and INPUT_TAG is set" {
     INPUT_BRANCH=""
-    INPUT_TAGGING_MESSAGE="v2.0.0"
+    INPUT_TAG_NAME="v2.0.0"
+    INPUT_TAGGING_MESSAGE="MyProduct v2.0.0"
+
 
     touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
 
@@ -388,8 +436,8 @@ cat_github_output() {
 
     assert_success
 
-    assert_line "INPUT_TAGGING_MESSAGE: v2.0.0"
-    assert_line "::debug::Create tag v2.0.0"
+    assert_line "INPUT_TAG_NAME: v2.0.0"
+    assert_line "::debug::Create tag v2.0.0: MyProduct v2.0.0"
     assert_line "::debug::git push origin --tags"
 
     # Assert a tag v2.0.0 has been created
@@ -411,7 +459,7 @@ cat_github_output() {
 
     assert_success
 
-    assert_line "::debug::git-fetch has not been executed"
+    assert_line "::debug::git-fetch will not be executed."
 }
 
 @test "If SKIP_CHECKOUT is true git-checkout will not be called" {
@@ -424,12 +472,14 @@ cat_github_output() {
 
     assert_success
 
-    assert_line "::debug::git-checkout has not been executed"
+    assert_line "::debug::git-checkout will not be executed."
 }
 
 @test "It pushes generated commit and tag to remote and actually updates the commit shas" {
     INPUT_BRANCH=""
-    INPUT_TAGGING_MESSAGE="v2.0.0"
+    INPUT_TAG_NAME="v2.0.0"
+    INPUT_TAGGING_MESSAGE="MyProduct v2.0.0"
+
 
     touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
 
@@ -437,8 +487,8 @@ cat_github_output() {
 
     assert_success
 
-    assert_line "INPUT_TAGGING_MESSAGE: v2.0.0"
-    assert_line "::debug::Create tag v2.0.0"
+    assert_line "INPUT_TAG_NAME: v2.0.0"
+    assert_line "::debug::Create tag v2.0.0: MyProduct v2.0.0"
     assert_line "::debug::git push origin --tags"
 
     # Assert a tag v2.0.0 has been created
@@ -462,7 +512,9 @@ cat_github_output() {
     git checkout ${FAKE_DEFAULT_BRANCH}
 
     INPUT_BRANCH="a-new-branch"
-    INPUT_TAGGING_MESSAGE="v2.0.0"
+    INPUT_TAG_NAME="v2.0.0"
+    INPUT_TAGGING_MESSAGE="MyProduct v2.0.0"
+
 
     touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
 
@@ -470,8 +522,8 @@ cat_github_output() {
 
     assert_success
 
-    assert_line "INPUT_TAGGING_MESSAGE: v2.0.0"
-    assert_line "::debug::Create tag v2.0.0"
+    assert_line "INPUT_TAG_NAME: v2.0.0"
+    assert_line "::debug::Create tag v2.0.0: MyProduct v2.0.0"
     assert_line "::debug::Push commit to remote branch a-new-branch"
 
     # Assert a tag v2.0.0 has been created
@@ -570,9 +622,8 @@ cat_github_output() {
     assert_line "changes_detected=true"
 }
 
-@test "script fails to push commit to new branch that does not exist yet" {
+@test "It pushes commit to new branch that does not exist yet" {
     INPUT_BRANCH="not-existend-branch"
-    INPUT_CREATE_BRANCH=false
 
     run git branch
     refute_line --partial "not-existend-branch"
@@ -582,27 +633,28 @@ cat_github_output() {
 
     touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
 
+    INPUT_SKIP_CHECKOUT=true
+
     run git_auto_commit
 
-    assert_failure
+    assert_success
 
     assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
     assert_line "INPUT_BRANCH value: not-existend-branch"
-    assert_line "fatal: invalid reference: not-existend-branch"
 
     run git branch
+    assert_line --partial ${FAKE_DEFAULT_BRANCH}
     refute_line --partial "not-existend-branch"
 
     run git branch -r
-    refute_line --partial "origin/not-existend-branch"
+    assert_line --partial "origin/not-existend-branch"
 
     run cat_github_output
     assert_line "changes_detected=true"
 }
 
-@test "It creates new local branch and pushes the new branch to remote" {
+@test "It does not create new local branch and pushes the commit to a new branch on remote" {
     INPUT_BRANCH="not-existend-branch"
-    INPUT_CREATE_BRANCH=true
 
     run git branch
     refute_line --partial "not-existend-branch"
@@ -611,6 +663,8 @@ cat_github_output() {
     refute_line --partial "origin/not-existend-branch"
 
     touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    INPUT_SKIP_CHECKOUT=true
 
     run git_auto_commit
 
@@ -621,15 +675,19 @@ cat_github_output() {
     assert_line "INPUT_FILE_PATTERN: ."
     assert_line "INPUT_COMMIT_OPTIONS: "
     assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAG_NAME: "
     assert_line "INPUT_TAGGING_MESSAGE: "
-    assert_line "No tagging message supplied. No tag will be added."
+    assert_line "Neither tag nor tag message is set. No tag will be added."
     assert_line "INPUT_PUSH_OPTIONS: "
     assert_line "::debug::Apply push options "
     assert_line "::debug::Push commit to remote branch not-existend-branch"
 
+    # Assert that local repo is still on default branch and not on new branch.
     run git branch
-    assert_line --partial "not-existend-branch"
+    assert_line --partial ${FAKE_DEFAULT_BRANCH}
+    refute_line --partial "not-existend-branch"
 
+    # Assert branch has been created on remote
     run git branch -r
     assert_line --partial "origin/not-existend-branch"
 
@@ -638,50 +696,7 @@ cat_github_output() {
     assert_line -e "commit_hash=[0-9a-f]{40}$"
 }
 
-@test "it does not create new local branch if local branch already exists" {
-
-    git checkout -b not-existend-remote-branch
-    git checkout ${FAKE_DEFAULT_BRANCH}
-
-    INPUT_BRANCH="not-existend-remote-branch"
-    INPUT_CREATE_BRANCH=true
-
-    run git branch
-    assert_line --partial "not-existend-remote-branch"
-
-    run git branch -r
-    refute_line --partial "origin/not-existend-remote-branch"
-
-    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
-
-    run git_auto_commit
-
-    assert_success
-
-    assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
-    assert_line "INPUT_BRANCH value: not-existend-remote-branch"
-    assert_line "INPUT_FILE_PATTERN: ."
-    assert_line "INPUT_COMMIT_OPTIONS: "
-    assert_line "::debug::Apply commit options "
-    assert_line "INPUT_TAGGING_MESSAGE: "
-    assert_line "No tagging message supplied. No tag will be added."
-    assert_line "INPUT_PUSH_OPTIONS: "
-    assert_line "::debug::Apply push options "
-    assert_line "::debug::Push commit to remote branch not-existend-remote-branch"
-
-    run git branch
-    assert_line --partial "not-existend-remote-branch"
-
-    run git branch -r
-    assert_line --partial "origin/not-existend-remote-branch"
-
-    run cat_github_output
-    assert_line "changes_detected=true"
-    assert_line -e "commit_hash=[0-9a-f]{40}$"
-}
-
-@test "it creates new local branch and pushes branch to remote even if the remote branch already exists" {
-
+@test "It creates new local branch and pushes branch to remote even if the remote branch already exists" {
     # Create `existing-remote-branch` on remote with changes the local repository does not yet have
     cd $FAKE_TEMP_LOCAL_REPOSITORY
     git checkout -b "existing-remote-branch"
@@ -698,7 +713,7 @@ cat_github_output() {
     cd $FAKE_LOCAL_REPOSITORY
 
     INPUT_BRANCH="existing-remote-branch"
-    INPUT_CREATE_BRANCH=true
+    INPUT_SKIP_CHECKOUT=true
 
     run git branch
     refute_line --partial "existing-remote-branch"
@@ -719,20 +734,22 @@ cat_github_output() {
     assert_line "INPUT_FILE_PATTERN: ."
     assert_line "INPUT_COMMIT_OPTIONS: "
     assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAG_NAME: "
     assert_line "INPUT_TAGGING_MESSAGE: "
-    assert_line "No tagging message supplied. No tag will be added."
+    assert_line "Neither tag nor tag message is set. No tag will be added."
     assert_line "INPUT_PUSH_OPTIONS: "
     assert_line "::debug::Apply push options "
     assert_line "::debug::Push commit to remote branch existing-remote-branch"
 
     run git branch
-    assert_line --partial "existing-remote-branch"
+    assert_line --partial ${FAKE_DEFAULT_BRANCH}
+    refute_line --partial "existing-remote-branch"
 
     run git branch -r
     assert_line --partial "origin/existing-remote-branch"
 
     # Assert that branch "existing-remote-branch" was updated on remote
-    current_sha="$(git rev-parse --verify --short existing-remote-branch)"
+    current_sha="$(git rev-parse --verify --short ${FAKE_DEFAULT_BRANCH})"
     remote_sha="$(git rev-parse --verify --short origin/existing-remote-branch)"
 
     assert_equal $current_sha $remote_sha
@@ -742,7 +759,7 @@ cat_github_output() {
     assert_line -e "commit_hash=[0-9a-f]{40}$"
 }
 
-@test "script fails if new local branch is checked out and push fails as remote has newer commits than local" {
+@test "It fails if local branch is behind remote and when remote has newer commits and skip_checkout is set to true" {
     # Create `existing-remote-branch` on remote with changes the local repository does not yet have
     cd $FAKE_TEMP_LOCAL_REPOSITORY
     git checkout -b "existing-remote-branch"
@@ -759,7 +776,7 @@ cat_github_output() {
     cd $FAKE_LOCAL_REPOSITORY
 
     INPUT_BRANCH="existing-remote-branch"
-    INPUT_CREATE_BRANCH=true
+    INPUT_SKIP_CHECKOUT=true
 
     run git branch
     refute_line --partial "existing-remote-branch"
@@ -774,23 +791,24 @@ cat_github_output() {
 
     assert_failure
 
-    assert_line "hint: Updates were rejected because the tip of your current branch is behind"
+    assert_line "hint: Updates were rejected because a pushed branch tip is behind its remote"
 
     # Assert that branch exists locally and on remote
     run git branch
-    assert_line --partial "existing-remote-branch"
+    assert_line --partial ${FAKE_DEFAULT_BRANCH}
+    refute_line --partial "existing-remote-branch"
 
     run git branch -r
     assert_line --partial "origin/existing-remote-branch"
 
     # Assert that branch "existing-remote-branch" was not updated on remote
-    current_sha="$(git rev-parse --verify --short existing-remote-branch)"
+    current_sha="$(git rev-parse --verify --short ${FAKE_DEFAULT_BRANCH})"
     remote_sha="$(git rev-parse --verify --short origin/existing-remote-branch)"
 
     refute [assert_equal $current_sha $remote_sha]
 }
 
-@test "It pushes commit to remote if branch already exists and local repo is behind its remote counterpart" {
+@test "It fails to push commit to remote if branch already exists and local repo is behind its remote counterpart and SKIP_CHECKOUT is used" {
     # Create `new-branch` on remote with changes the local repository does not yet have
     cd $FAKE_TEMP_LOCAL_REPOSITORY
 
@@ -809,8 +827,9 @@ cat_github_output() {
     cd $FAKE_LOCAL_REPOSITORY
 
     INPUT_BRANCH="new-branch"
+    INPUT_SKIP_CHECKOUT=true
 
-    # Assert that local remote does not know have "new-branch" locally nor does
+    # Assert that local remote does not have a "new-branch"-branch nor does
     # know about the remote branch.
     run git branch
     refute_line --partial "new-branch"
@@ -822,16 +841,12 @@ cat_github_output() {
 
     run git_auto_commit
 
-    assert_success
+    assert_failure
 
     assert_line "INPUT_BRANCH value: new-branch"
     assert_line --partial "::debug::Push commit to remote branch new-branch"
 
-    # Assert that branch "new-branch" was updated on remote
-    current_sha="$(git rev-parse --verify --short new-branch)"
-    remote_sha="$(git rev-parse --verify --short origin/new-branch)"
-
-    assert_equal $current_sha $remote_sha
+    assert_line --partial "Updates were rejected because a pushed branch tip is behind its remote"
 }
 
 @test "throws fatal error if file pattern includes files that do not exist" {
@@ -968,7 +983,7 @@ cat_github_output() {
     assert_line --partial "another-subdirectory/new-file-3.txt"
 }
 
-@test "fails to detect crlf change in files and does not detect change or commit changes" {
+@test "detects if crlf in files change and does not create commit" {
     # Set autocrlf to true
     cd "${FAKE_LOCAL_REPOSITORY}"
     git config core.autocrlf true
@@ -976,24 +991,909 @@ cat_github_output() {
     assert_line "true"
 
     # Add more .txt files
-    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-2.txt
-    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-3.txt
+    echo -ne "crlf test1\r\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-2.txt
+    echo -ne "crlf test1\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-3.txt
 
     # Run git-auto-commit to add new files to repository
     run git_auto_commit
 
     # Change control characters in files
-    sed 's/^M$//' "${FAKE_LOCAL_REPOSITORY}"/new-file-2.txt
-    sed 's/$/^M/' "${FAKE_LOCAL_REPOSITORY}"/new-file-3.txt
+    echo -ne "crlf test1\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-2.txt
+    echo -ne "crlf test1\r\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-3.txt
 
     # Run git-auto-commit to commit the 2 changes files
     run git_auto_commit
 
     assert_success
 
-    # Changes are not detected
-    assert_line --partial "Working tree clean. Nothing to commit."
+    refute_line --partial "2 files changed, 2 insertions(+), 2 deletions(-)"
+    assert_line --partial "warning: in the working copy of 'new-file-2.txt', LF will be replaced by CRLF the next time Git touches it"
 
-    refute_line --partial "new-file-2.txt"
-    refute_line --partial "new-file-3.txt"
+    assert_line --partial "Working tree clean. Nothing to commit."
+    assert_line --partial "new-file-2.txt"
+    # assert_line --partial "new-file-3.txt"
+
+    # Changes are not detected
+    run cat_github_output
+    assert_line "changes_detected=false"
+}
+
+@test "detects if crlf in files change and creates commit if the actual content of the files change" {
+    # Set autocrlf to true
+    cd "${FAKE_LOCAL_REPOSITORY}"
+    git config core.autocrlf true
+    run git config --get-all core.autocrlf
+    assert_line "true"
+
+    # Add more .txt files
+    echo -ne "crlf test1\r\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-2.txt
+    echo -ne "crlf test1\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-3.txt
+
+    # Run git-auto-commit to add new files to repository
+    run git_auto_commit
+
+    # Change control characters in files
+    echo -ne "crlf test2\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-2.txt
+    echo -ne "crlf test2\r\n" > "${FAKE_LOCAL_REPOSITORY}"/new-file-3.txt
+
+    # Run git-auto-commit to commit the 2 changes files
+    run git_auto_commit
+
+    assert_success
+
+    assert_line --partial "2 files changed, 2 insertions(+), 2 deletions(-)"
+    assert_line --partial "warning: in the working copy of 'new-file-2.txt', LF will be replaced by CRLF the next time Git touches it"
+
+    assert_line --partial "new-file-2.txt"
+    # assert_line --partial "new-file-3.txt"
+
+    # Changes are detected
+    run cat_github_output
+    assert_line "changes_detected=true"
+}
+
+
+@test "It uses old set-output syntax if GITHUB_OUTPUT environment is not available when changes are committed" {
+    unset GITHUB_OUTPUT
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
+    assert_line "INPUT_BRANCH value: ${FAKE_DEFAULT_BRANCH}"
+    assert_line "INPUT_FILE_PATTERN: ."
+    assert_line "INPUT_COMMIT_OPTIONS: "
+    assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAG_NAME: "
+    assert_line "INPUT_TAGGING_MESSAGE: "
+    assert_line "Neither tag nor tag message is set. No tag will be added."
+    assert_line "INPUT_PUSH_OPTIONS: "
+    assert_line "::debug::Apply push options "
+    assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
+
+    assert_line "::set-output name=changes_detected::true"
+    assert_line -e "::set-output name=commit_hash::[0-9a-f]{40}$"
+}
+
+@test "It uses old set-output syntax if GITHUB_OUTPUT environment is not available when no changes have been detected" {
+    unset GITHUB_OUTPUT
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
+    assert_line "Working tree clean. Nothing to commit."
+
+    assert_line "::set-output name=changes_detected::false"
+    refute_line -e "::set-output name=commit_hash::[0-9a-f]{40}$"
+}
+
+@test "It fails hard if git is not available" {
+    INPUT_INTERNAL_GIT_BINARY=binary-does-not-exist
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_failure;
+    assert_line "::error::git-auto-commit could not find git binary. Please make sure git is available."
+}
+
+@test "It creates multi-line commit messages" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    COMMIT_MESSAGE=$(cat <<-END
+    this commit message
+    has multiple lines
+END
+)
+
+    INPUT_COMMIT_MESSAGE=$COMMIT_MESSAGE
+
+    run git_auto_commit
+
+    assert_success
+
+    # Assert last commit was signed off
+    run git log -n 1
+    assert_output --partial $COMMIT_MESSAGE
+}
+
+@test "It exits with error message if entrypoint.sh is being run not in a git repository" {
+    INPUT_REPOSITORY="${FAKE_FOLDER_WITHOUT_GIT_REPO}"
+
+    mkdir "${INPUT_REPOSITORY}"
+
+    run git_auto_commit
+
+    assert_failure;
+    assert_line "::error::Not a git repository. Please make sure to run this action in a git repository. Adjust the \`repository\` input if necessary."
+}
+
+@test "It does not treat the error message for a missing git repository as a shell command" {
+    INPUT_REPOSITORY="${FAKE_FOLDER_WITHOUT_GIT_REPO}"
+
+    mkdir "${INPUT_REPOSITORY}"
+
+    run git_auto_commit
+
+    assert_failure;
+    refute_output --partial "command not found"
+}
+
+@test "It exits with error message if the repository input points to a non-existing directory" {
+    INPUT_REPOSITORY="${FAKE_FOLDER_WITHOUT_GIT_REPO}/does-not-exist"
+
+    run git_auto_commit
+
+    assert_failure;
+}
+
+@test "It commits and pushes changes in a git submodule" {
+    FAKE_SUPERPROJECT="${BATS_TEST_DIRNAME}/tests_superproject"
+    rm -rf "${FAKE_SUPERPROJECT}"
+    git init --quiet "${FAKE_SUPERPROJECT}"
+    cd "${FAKE_SUPERPROJECT}"
+    git -c protocol.file.allow=always submodule add --quiet "${FAKE_REMOTE}" posts
+    git commit --quiet -m "Add submodule"
+
+    # In a submodule `.git` is a file pointing to the superproject's `.git/modules` directory
+    assert [ -f "${FAKE_SUPERPROJECT}/posts/.git" ]
+    assert [ ! -d "${FAKE_SUPERPROJECT}/posts/.git" ]
+
+    cd "${FAKE_SUPERPROJECT}/posts"
+    git checkout --quiet "${FAKE_DEFAULT_BRANCH}"
+    cd "${FAKE_SUPERPROJECT}"
+
+    INPUT_REPOSITORY="${FAKE_SUPERPROJECT}/posts"
+    touch "${INPUT_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+    refute_output --partial "Not a git repository"
+    assert_line "::debug::Repository found."
+
+    run cat_github_output
+    assert_line "changes_detected=true"
+    assert_line -e "commit_hash=[0-9a-f]{40}$"
+
+    # The commit has been pushed to the submodule's remote
+    run git --git-dir="${FAKE_REMOTE}" log -n 1 --pretty=%s
+    assert_output "Commit Message"
+
+    run git --git-dir="${FAKE_REMOTE}" ls-tree --name-only -r "${FAKE_DEFAULT_BRANCH}"
+    assert_line "new-file-1.txt"
+
+    rm -rf "${FAKE_SUPERPROJECT}"
+}
+
+@test "It uses a relative path to a git submodule as repository" {
+    FAKE_SUPERPROJECT="${BATS_TEST_DIRNAME}/tests_superproject"
+    rm -rf "${FAKE_SUPERPROJECT}"
+    git init --quiet "${FAKE_SUPERPROJECT}"
+    cd "${FAKE_SUPERPROJECT}"
+    git -c protocol.file.allow=always submodule add --quiet "${FAKE_REMOTE}" posts
+    git commit --quiet -m "Add submodule"
+    git -C posts checkout --quiet "${FAKE_DEFAULT_BRANCH}"
+
+    INPUT_REPOSITORY="posts"
+    touch "${FAKE_SUPERPROJECT}"/posts/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Repository found."
+
+    run git --git-dir="${FAKE_REMOTE}" ls-tree --name-only -r "${FAKE_DEFAULT_BRANCH}"
+    assert_line "new-file-1.txt"
+
+    rm -rf "${FAKE_SUPERPROJECT}"
+    INPUT_REPOSITORY="${FAKE_LOCAL_REPOSITORY}"
+}
+
+@test "It accepts a repository whose .git is a file pointing to a separate git directory" {
+    SEPARATE_GIT_DIR="${BATS_TEST_DIRNAME}/tests_separate_git_dir"
+    WORK_TREE="${BATS_TEST_DIRNAME}/tests_separate_work_tree"
+    rm -rf "${SEPARATE_GIT_DIR}" "${WORK_TREE}"
+
+    git clone --quiet --separate-git-dir="${SEPARATE_GIT_DIR}" "${FAKE_REMOTE}" "${WORK_TREE}"
+
+    assert [ -f "${WORK_TREE}/.git" ]
+
+    INPUT_REPOSITORY="${WORK_TREE}"
+    touch "${WORK_TREE}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Repository found."
+
+    run cat_github_output
+    assert_line "changes_detected=true"
+
+    run git --git-dir="${FAKE_REMOTE}" ls-tree --name-only -r "${FAKE_DEFAULT_BRANCH}"
+    assert_line "new-file-1.txt"
+
+    rm -rf "${SEPARATE_GIT_DIR}" "${WORK_TREE}"
+    INPUT_REPOSITORY="${FAKE_LOCAL_REPOSITORY}"
+}
+
+@test "It accepts a linked git worktree as repository" {
+    WORKTREE="${BATS_TEST_DIRNAME}/tests_linked_worktree"
+    rm -rf "${WORKTREE}"
+
+    cd "${FAKE_LOCAL_REPOSITORY}"
+    git worktree add --quiet -b worktree-branch "${WORKTREE}"
+
+    assert [ -f "${WORKTREE}/.git" ]
+
+    INPUT_REPOSITORY="${WORKTREE}"
+    INPUT_BRANCH="worktree-branch"
+    touch "${WORKTREE}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Repository found."
+
+    run git --git-dir="${FAKE_REMOTE}" ls-tree --name-only -r worktree-branch
+    assert_line "new-file-1.txt"
+
+    cd "${FAKE_LOCAL_REPOSITORY}"
+    git worktree remove --force "${WORKTREE}"
+    INPUT_REPOSITORY="${FAKE_LOCAL_REPOSITORY}"
+}
+
+@test "It detects if the repository is in a detached state and logs a warning" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    # Bring local repository into a detached state
+    prev_commit=$(git rev-parse HEAD~1);
+    git checkout "$prev_commit";
+
+    touch "${FAKE_TEMP_LOCAL_REPOSITORY}"/remote-files{4,5,6}.txt
+
+    run git_auto_commit
+
+    assert_success;
+    assert_line "::warning::Repository is in a detached HEAD state. git-auto-commit will likely handle this automatically. To avoid it, check out a branch using the ref option in actions/checkout."
+}
+
+@test "it creates a tag if create_git_tag_only is set to true and a message has been supplied" {
+    INPUT_CREATE_GIT_TAG_ONLY=true
+    INPUT_TAG_NAME=v1.0.0
+    INPUT_TAGGING_MESSAGE="MyProduct v1.0.0"
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "::debug::Create git tag only"
+
+    assert_line "::debug::Create tag v1.0.0: MyProduct v1.0.0"
+    refute_line "Neither tag nor tag message is set. No tag will be added."
+
+    assert_line "::debug::Apply push options "
+    assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
+
+    run cat_github_output
+    assert_line "create_git_tag_only=true"
+    refute_line "changes_detected=false"
+    refute_line -e "commit_hash=[0-9a-f]{40}$"
+
+    # Assert a tag v1.0.0 has been created
+    run git tag -n
+    assert_output 'v1.0.0          MyProduct v1.0.0'
+
+    run git ls-remote --tags --refs
+    assert_output --partial refs/tags/v1.0.0
+}
+
+@test "it output no tagging message supplied if no tagging message is set but create_git_tag_only is set to true" {
+    INPUT_CREATE_GIT_TAG_ONLY=true
+    INPUT_TAG_NAME=""
+    INPUT_TAGGING_MESSAGE=""
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_TAG_NAME: "
+    assert_line "INPUT_TAGGING_MESSAGE: "
+    assert_line "Neither tag nor tag message is set. No tag will be added."
+    assert_line "::debug::Create git tag only"
+
+    run cat_github_output
+    assert_line "create_git_tag_only=true"
+    refute_line "changes_detected=false"
+    refute_line -e "commit_hash=[0-9a-f]{40}$"
+
+    # Assert no tag has been created
+    run git tag
+    assert_output ""
+}
+
+@test "script fails to push commit to new branch that does not exist yet" {
+    INPUT_BRANCH="not-existend-branch"
+    INPUT_CREATE_BRANCH=false
+
+    run git branch
+    refute_line --partial "not-existend-branch"
+
+    run git branch -r
+    refute_line --partial "origin/not-existend-branch"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_failure
+
+    assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
+    assert_line "INPUT_BRANCH value: not-existend-branch"
+    assert_line "fatal: invalid reference: not-existend-branch"
+
+    run git branch
+    refute_line --partial "not-existend-branch"
+
+    run git branch -r
+    refute_line --partial "origin/not-existend-branch"
+
+    run cat_github_output
+    assert_line "changes_detected=true"
+}
+
+@test "It creates new local branch and pushes the new branch to remote" {
+    INPUT_BRANCH="not-existend-branch"
+    INPUT_CREATE_BRANCH=true
+
+    run git branch
+    refute_line --partial "not-existend-branch"
+
+    run git branch -r
+    refute_line --partial "origin/not-existend-branch"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
+    assert_line "INPUT_BRANCH value: not-existend-branch"
+    assert_line "INPUT_FILE_PATTERN: ."
+    assert_line "INPUT_COMMIT_OPTIONS: "
+    assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAGGING_MESSAGE: "
+    assert_line "Neither tag nor tag message is set. No tag will be added."
+    assert_line "INPUT_PUSH_OPTIONS: "
+    assert_line "::debug::Apply push options "
+    assert_line "::debug::Push commit to remote branch not-existend-branch"
+
+    run git branch
+    assert_line --partial "not-existend-branch"
+
+    run git branch -r
+    assert_line --partial "origin/not-existend-branch"
+
+    run cat_github_output
+    assert_line "changes_detected=true"
+    assert_line -e "commit_hash=[0-9a-f]{40}$"
+}
+
+@test "It does not create new local branch if local branch already exists and SKIP_CHECKOUT is true" {
+    git checkout -b not-existend-remote-branch
+    git checkout ${FAKE_DEFAULT_BRANCH}
+
+    INPUT_BRANCH="not-existend-remote-branch"
+    INPUT_SKIP_CHECKOUT=true
+
+    run git branch
+    assert_line --partial "not-existend-remote-branch"
+
+    run git branch -r
+    refute_line --partial "origin/not-existend-remote-branch"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
+    assert_line "INPUT_BRANCH value: not-existend-remote-branch"
+    assert_line "INPUT_FILE_PATTERN: ."
+    assert_line "INPUT_COMMIT_OPTIONS: "
+    assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAGGING_MESSAGE: "
+    assert_line "Neither tag nor tag message is set. No tag will be added."
+    assert_line "INPUT_PUSH_OPTIONS: "
+    assert_line "::debug::Apply push options "
+    assert_line "::debug::Push commit to remote branch not-existend-remote-branch"
+
+    # Assert checked out branch is still the same.
+    run git rev-parse --abbrev-ref HEAD
+    assert_line --partial ${FAKE_DEFAULT_BRANCH}
+    refute_line --partial "not-existend-remote-branch"
+
+    run git branch
+    assert_line --partial "not-existend-remote-branch"
+
+    run git branch -r
+    assert_line --partial "origin/not-existend-remote-branch"
+
+    run cat_github_output
+    assert_line "changes_detected=true"
+    assert_line -e "commit_hash=[0-9a-f]{40}$"
+}
+
+@test "it creates new local branch and pushes branch to remote even if the remote branch already exists" {
+
+    # Create `existing-remote-branch` on remote with changes the local repository does not yet have
+    cd $FAKE_TEMP_LOCAL_REPOSITORY
+    git checkout -b "existing-remote-branch"
+    touch new-branch-file.txt
+    git add new-branch-file.txt
+    git commit -m "Add additional file"
+    git push origin existing-remote-branch
+
+    run git branch
+    assert_line --partial "existing-remote-branch"
+
+    # ---------
+    # Switch to our regular local repository and run `git-auto-commit`
+    cd $FAKE_LOCAL_REPOSITORY
+
+    INPUT_BRANCH="existing-remote-branch"
+    INPUT_CREATE_BRANCH=true
+
+    run git branch
+    refute_line --partial "existing-remote-branch"
+
+    run git fetch --all
+    run git pull origin existing-remote-branch
+    run git branch -r
+    assert_line --partial "origin/existing-remote-branch"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_REPOSITORY value: ${INPUT_REPOSITORY}"
+    assert_line "INPUT_BRANCH value: existing-remote-branch"
+    assert_line "INPUT_FILE_PATTERN: ."
+    assert_line "INPUT_COMMIT_OPTIONS: "
+    assert_line "::debug::Apply commit options "
+    assert_line "INPUT_TAGGING_MESSAGE: "
+    assert_line "Neither tag nor tag message is set. No tag will be added."
+    assert_line "INPUT_PUSH_OPTIONS: "
+    assert_line "::debug::Apply push options "
+    assert_line "::debug::Push commit to remote branch existing-remote-branch"
+
+    run git branch
+    assert_line --partial "existing-remote-branch"
+
+    run git branch -r
+    assert_line --partial "origin/existing-remote-branch"
+
+    # Assert that branch "existing-remote-branch" was updated on remote
+    current_sha="$(git rev-parse --verify --short existing-remote-branch)"
+    remote_sha="$(git rev-parse --verify --short origin/existing-remote-branch)"
+
+    assert_equal $current_sha $remote_sha
+
+    run cat_github_output
+    assert_line "changes_detected=true"
+    assert_line -e "commit_hash=[0-9a-f]{40}$"
+}
+
+@test "script fails if new local branch is checked out and push fails as remote has newer commits than local" {
+    # Create `existing-remote-branch` on remote with changes the local repository does not yet have
+    cd $FAKE_TEMP_LOCAL_REPOSITORY
+    git checkout -b "existing-remote-branch"
+    touch new-branch-file.txt
+    git add new-branch-file.txt
+    git commit -m "Add additional file"
+    git push origin existing-remote-branch
+
+    run git branch
+    assert_line --partial "existing-remote-branch"
+
+    # ---------
+    # Switch to our regular local repository and run `git-auto-commit`
+    cd $FAKE_LOCAL_REPOSITORY
+
+    INPUT_BRANCH="existing-remote-branch"
+    INPUT_CREATE_BRANCH=true
+
+    run git branch
+    refute_line --partial "existing-remote-branch"
+
+    run git fetch --all
+    run git branch -r
+    assert_line --partial "origin/existing-remote-branch"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_failure
+
+    assert_line "hint: Updates were rejected because the tip of your current branch is behind"
+
+    # Assert that branch exists locally and on remote
+    run git branch
+    assert_line --partial "existing-remote-branch"
+
+    run git branch -r
+    assert_line --partial "origin/existing-remote-branch"
+
+    # Assert that branch "existing-remote-branch" was not updated on remote
+    current_sha="$(git rev-parse --verify --short existing-remote-branch)"
+    remote_sha="$(git rev-parse --verify --short origin/existing-remote-branch)"
+
+    refute [assert_equal $current_sha $remote_sha]
+}
+
+@test "It pushes commit to remote if branch already exists and local repo is behind its remote counterpart" {
+    # Create `new-branch` on remote with changes the local repository does not yet have
+    cd $FAKE_TEMP_LOCAL_REPOSITORY
+
+    git checkout -b "new-branch"
+    touch new-branch-file.txt
+    git add new-branch-file.txt
+
+    git commit --quiet -m "Add additional file"
+    git push origin new-branch
+
+    run git branch -r
+    assert_line --partial "origin/new-branch"
+
+    # ---------
+    # Switch to our regular local repository and run `git-auto-commit`
+    cd $FAKE_LOCAL_REPOSITORY
+
+    INPUT_BRANCH="new-branch"
+
+    # Assert that local remote does not know have "new-branch" locally nor does
+    # know about the remote branch.
+    run git branch
+    refute_line --partial "new-branch"
+
+    run git branch -r
+    refute_line --partial "origin/new-branch"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_BRANCH value: new-branch"
+    assert_line --partial "::debug::Push commit to remote branch new-branch"
+
+    # Assert that branch "new-branch" was updated on remote
+    current_sha="$(git rev-parse --verify --short new-branch)"
+    remote_sha="$(git rev-parse --verify --short origin/new-branch)"
+
+    assert_equal $current_sha $remote_sha
+}
+
+@test "Set a tag message only" {
+    INPUT_TAGGING_MESSAGE="v1.0.0"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_TAG_NAME: "
+    assert_line "INPUT_TAGGING_MESSAGE: v1.0.0"
+
+    assert_line "::debug::Create tag v1.0.0: v1.0.0"
+    assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
+
+    # Assert a tag v1.0.0 has been created
+    run git tag -n
+    assert_output 'v1.0.0          v1.0.0'
+
+    run git ls-remote --tags --refs
+    assert_output --partial refs/tags/v1.0.0
+
+    # Assert that the commit has been pushed with --force and
+    # sha values are equal on local and remote
+    current_sha="$(git rev-parse --verify --short ${FAKE_DEFAULT_BRANCH})"
+    remote_sha="$(git rev-parse --verify --short origin/${FAKE_DEFAULT_BRANCH})"
+
+    assert_equal $current_sha $remote_sha
+}
+
+@test "Set a tag only" {
+    INPUT_TAG_NAME="v1.0.0"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-{1,2,3}.txt
+
+    run git_auto_commit
+
+    assert_success
+
+    assert_line "INPUT_TAG_NAME: v1.0.0"
+    assert_line "INPUT_TAGGING_MESSAGE: "
+
+    assert_line "::debug::Create tag v1.0.0: v1.0.0"
+    assert_line "::debug::Push commit to remote branch ${FAKE_DEFAULT_BRANCH}"
+
+    # Assert a tag v1.0.0 has been created
+    run git tag -n
+    assert_output 'v1.0.0          v1.0.0'
+
+    run git ls-remote --tags --refs
+    assert_output --partial refs/tags/v1.0.0
+
+    # Assert that the commit has been pushed with --force and
+    # sha values are equal on local and remote
+    current_sha="$(git rev-parse --verify --short ${FAKE_DEFAULT_BRANCH})"
+    remote_sha="$(git rev-parse --verify --short origin/${FAKE_DEFAULT_BRANCH})"
+
+    assert_equal $current_sha $remote_sha
+}
+
+@test "It emits a warning when running on a pull_request_target event" {
+    export GITHUB_EVENT_NAME="pull_request_target"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+
+    run git_auto_commit
+
+    assert_success
+    assert_output --partial "::warning::git-auto-commit is running on a 'pull_request_target' event."
+    assert_output --partial "disable_pull_request_target_trigger_warning"
+}
+
+@test "It does not emit the pull_request_target warning when the event is pull_request" {
+    export GITHUB_EVENT_NAME="pull_request"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+
+    run git_auto_commit
+
+    assert_success
+    refute_output --partial "::warning::git-auto-commit is running on a 'pull_request_target' event."
+}
+
+@test "It does not emit the pull_request_target warning when GITHUB_EVENT_NAME is unset" {
+    unset GITHUB_EVENT_NAME
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+
+    run git_auto_commit
+
+    assert_success
+    refute_output --partial "::warning::git-auto-commit is running on a 'pull_request_target' event."
+}
+
+@test "It does not emit the pull_request_target warning when disable_pull_request_target_trigger_warning is true" {
+    export GITHUB_EVENT_NAME="pull_request_target"
+    export INPUT_DISABLE_PULL_REQUEST_TARGET_TRIGGER_WARNING=true
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+
+    run git_auto_commit
+
+    assert_success
+    refute_output --partial "::warning::git-auto-commit is running on a 'pull_request_target' event."
+}
+
+@test "It does not log a hook line when no hooks are set" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+
+    run git_auto_commit
+
+    assert_success
+    refute_output --partial "::debug::Running"
+}
+
+@test "It runs the before_add hook before git add" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_ADD_HOOK="echo BEFORE_ADD_RAN > '${FAKE_LOCAL_REPOSITORY}/before-add-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running before_add_hook"
+    [ -f "${FAKE_LOCAL_REPOSITORY}/before-add-marker.txt" ]
+}
+
+@test "It runs the after_add hook after git add" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_AFTER_ADD_HOOK="echo AFTER_ADD_RAN > '${FAKE_LOCAL_REPOSITORY}/after-add-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running after_add_hook"
+    [ -f "${FAKE_LOCAL_REPOSITORY}/after-add-marker.txt" ]
+}
+
+@test "It runs the before_commit hook before creating the commit" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_COMMIT_HOOK="echo BEFORE_COMMIT_RAN > '${FAKE_LOCAL_REPOSITORY}/before-commit-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running before_commit_hook"
+    [ -f "${FAKE_LOCAL_REPOSITORY}/before-commit-marker.txt" ]
+
+    # The marker was created after `git add` ran, so it is NOT in the commit.
+    run git show --name-only HEAD
+    refute_output --partial "before-commit-marker.txt"
+}
+
+@test "It runs the after_commit hook after creating the commit" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_AFTER_COMMIT_HOOK="git rev-parse HEAD > '${FAKE_LOCAL_REPOSITORY}/after-commit-sha.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running after_commit_hook"
+    [ -f "${FAKE_LOCAL_REPOSITORY}/after-commit-sha.txt" ]
+
+    # Sanity check: the SHA written is a valid commit hash
+    run cat "${FAKE_LOCAL_REPOSITORY}/after-commit-sha.txt"
+    assert_output --regexp '^[0-9a-f]{40}$'
+}
+
+@test "It does not run add or commit hooks when the working tree is clean" {
+    export INPUT_BEFORE_ADD_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/before-add-marker.txt'"
+    export INPUT_AFTER_ADD_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/after-add-marker.txt'"
+    export INPUT_BEFORE_COMMIT_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/before-commit-marker.txt'"
+    export INPUT_AFTER_COMMIT_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/after-commit-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "Working tree clean. Nothing to commit."
+    refute_output --partial "::debug::Running"
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/before-add-marker.txt" ]
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/after-add-marker.txt" ]
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/before-commit-marker.txt" ]
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/after-commit-marker.txt" ]
+}
+
+@test "It runs before_tag and after_tag hooks when creating a tag" {
+    INPUT_TAG_NAME="v1.0.0"
+    INPUT_TAGGING_MESSAGE="Release v1.0.0"
+
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_TAG_HOOK="echo BEFORE_TAG_RAN > '${FAKE_LOCAL_REPOSITORY}/before-tag-marker.txt'"
+    export INPUT_AFTER_TAG_HOOK="echo AFTER_TAG_RAN > '${FAKE_LOCAL_REPOSITORY}/after-tag-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running before_tag_hook"
+    assert_line "::debug::Running after_tag_hook"
+    [ -f "${FAKE_LOCAL_REPOSITORY}/before-tag-marker.txt" ]
+    [ -f "${FAKE_LOCAL_REPOSITORY}/after-tag-marker.txt" ]
+}
+
+@test "It does not run tag hooks when no tag name or tagging message is set" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_TAG_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/before-tag-marker.txt'"
+    export INPUT_AFTER_TAG_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/after-tag-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    refute_line "::debug::Running before_tag_hook"
+    refute_line "::debug::Running after_tag_hook"
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/before-tag-marker.txt" ]
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/after-tag-marker.txt" ]
+}
+
+@test "It runs tag hooks under create_git_tag_only mode" {
+    INPUT_CREATE_GIT_TAG_ONLY=true
+    INPUT_TAG_NAME="v1.0.0"
+    INPUT_TAGGING_MESSAGE="Release v1.0.0"
+
+    export INPUT_BEFORE_TAG_HOOK="echo BEFORE_TAG_RAN > '${FAKE_LOCAL_REPOSITORY}/before-tag-marker.txt'"
+    export INPUT_AFTER_TAG_HOOK="echo AFTER_TAG_RAN > '${FAKE_LOCAL_REPOSITORY}/after-tag-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running before_tag_hook"
+    assert_line "::debug::Running after_tag_hook"
+    [ -f "${FAKE_LOCAL_REPOSITORY}/before-tag-marker.txt" ]
+    [ -f "${FAKE_LOCAL_REPOSITORY}/after-tag-marker.txt" ]
+}
+
+@test "It runs before_push and after_push hooks around git push" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_PUSH_HOOK="echo BEFORE_PUSH_RAN > '${FAKE_LOCAL_REPOSITORY}/before-push-marker.txt'"
+    export INPUT_AFTER_PUSH_HOOK="echo AFTER_PUSH_RAN > '${FAKE_LOCAL_REPOSITORY}/after-push-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running before_push_hook"
+    assert_line "::debug::Running after_push_hook"
+    [ -f "${FAKE_LOCAL_REPOSITORY}/before-push-marker.txt" ]
+    [ -f "${FAKE_LOCAL_REPOSITORY}/after-push-marker.txt" ]
+}
+
+@test "It does not run push hooks when skip_push is true" {
+    INPUT_SKIP_PUSH=true
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_PUSH_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/before-push-marker.txt'"
+    export INPUT_AFTER_PUSH_HOOK="echo SHOULD_NOT_RUN > '${FAKE_LOCAL_REPOSITORY}/after-push-marker.txt'"
+
+    run git_auto_commit
+
+    assert_success
+    refute_line "::debug::Running before_push_hook"
+    refute_line "::debug::Running after_push_hook"
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/before-push-marker.txt" ]
+    [ ! -f "${FAKE_LOCAL_REPOSITORY}/after-push-marker.txt" ]
+}
+
+@test "A hook that exits non-zero aborts the action" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_COMMIT_HOOK="exit 1"
+
+    run git_auto_commit
+
+    assert_failure
+    assert_line "::debug::Running before_commit_hook"
+
+    # Assert the action aborted before committing: no commit_hash output was written.
+    run cat_github_output
+    refute_line -e "commit_hash=[0-9a-f]{40}$"
+}
+
+@test "A before_commit hook can mutate INPUT_COMMIT_MESSAGE and the change is reflected in the commit" {
+    touch "${FAKE_LOCAL_REPOSITORY}"/new-file-1.txt
+    export INPUT_BEFORE_COMMIT_HOOK="INPUT_COMMIT_MESSAGE='message rewritten by hook'"
+
+    run git_auto_commit
+
+    assert_success
+    assert_line "::debug::Running before_commit_hook"
+
+    run git -C "${FAKE_LOCAL_REPOSITORY}" log -1 --pretty=%B
+    assert_line "message rewritten by hook"
 }
